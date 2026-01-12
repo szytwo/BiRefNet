@@ -18,6 +18,8 @@ from PIL import Image
 from torchvision import transforms
 from tqdm import tqdm
 
+from wdd.file_utils import delete_old_files_and_folders, logging
+
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 
 # Supported image extensions
@@ -34,7 +36,7 @@ def setup_model(local_checkpoint_path: str, device: str):
     current_dir = Path(__file__).resolve().parent
     model_path = (current_dir / local_checkpoint_path).resolve()
 
-    print(f"Loading BiRefNet model from {model_path} on {device}...")
+    logging.info(f"Loading BiRefNet model from {model_path} on {device}...")
 
     torch.set_float32_matmul_precision("high")
 
@@ -154,10 +156,10 @@ def process_directory(
     ]
 
     if not image_files:
-        print(f"No images found in {input_dir}")
+        logging.warning(f"No images found in {input_dir}")
         return
 
-    print(f"Found {len(image_files)} images to process.")
+    logging.info(f"Found {len(image_files)} images to process.")
 
     # Batch processing
     successful, failed = 0, 0
@@ -172,7 +174,7 @@ def process_directory(
                     batch_images.append(img.copy())
                 batch_names.append(p.stem)
             except Exception as e:
-                print(f"Error loading {p.name}: {e}")
+                logging.warning(f"Error loading {p.name}: {e}")
                 failed += 1
 
         if not batch_images:
@@ -186,7 +188,7 @@ def process_directory(
                 img_out.save(output_path / f"{name}.png")
                 successful += 1
         except Exception as e:
-            print(f"Batch failed, fallback to single-image processing: {e}")
+            logging.warning(f"Batch failed, fallback to single-image processing: {e}")
 
             if device == "cuda":
                 torch.cuda.empty_cache()
@@ -201,14 +203,14 @@ def process_directory(
                     single_result.save(output_path / f"{name}.png")
                     successful += 1
                 except Exception as e2:
-                    print(f"Failed on {name}: {e2}")
+                    logging.warning(f"Failed on {name}: {e2}")
                     failed += 1
 
-    print(f"Processing complete!")
-    print(f"Successful: {successful}")
+    logging.info(f"Processing complete!")
+    logging.info(f"Successful: {successful}")
     if failed > 0:
-        print(f"Failed: {failed}")
-    print(f"Output saved to: {output_path}")
+        logging.warning(f"Failed: {failed}")
+    logging.info(f"Output saved to: {output_path}")
 
 
 def main():
@@ -252,7 +254,7 @@ def main():
     try:
         width, height = [int(x) for x in args.resolution.lower().split("x")]
     except Exception as e:
-        print(f"Invalid resolution '{args.resolution}', using 1024x1024")
+        logging.warning(f"Invalid resolution '{args.resolution}', using 1024x1024")
         width, height = 1024, 1024
 
     # Setup model and transform

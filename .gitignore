@@ -164,3 +164,7 @@ dmypy.json
 checkpoint/
 examples/input/
 examples/output/
+error/
+error01/
+logs/
+logs01/
