@@ -67,7 +67,9 @@ def get_transform(img_size=(1024, 1024)):
     )
 
 
-def remove_background_batch(images: list, model, transform, device, autocast_ctx):
+def remove_background_batch(
+    images: list, model, transform, device, autocast_ctx, max_workers=8
+):
     """
     Remove background from an image using BiRefNet.
 
@@ -80,11 +82,11 @@ def remove_background_batch(images: list, model, transform, device, autocast_ctx
     Returns:
         PIL Image with transparent background
     """
+
+    # Step 1: GPU batch inference
     batch_tensors = []
-    orig_sizes = []
 
     for img in images:
-        orig_sizes.append(img.size)  # (W,H)
         img_rgb = img.convert("RGB")
         tensor = transform(img_rgb)
 
@@ -95,17 +97,20 @@ def remove_background_batch(images: list, model, transform, device, autocast_ctx
     with torch.no_grad(), autocast_ctx:
         preds = model(batch_tensor)[-1].sigmoid()  # (B,C,H,W)
 
-    results = []
-    marks = []
-    for i, pred in enumerate(preds):
-        pred = pred[0].cpu() if pred.ndim == 3 else pred.cpu()
-        pred = pred.squeeze()
+    # Step 2: CPU post-processing per image
+    results = [None] * len(images)
+    marks = [None] * len(images)
+
+    def process_single(i_pred_img):
+        i, (pred, img) = i_pred_img
+        pred_cpu = pred[0].cpu() if pred.ndim == 3 else pred.cpu()
+        pred_cpu = pred_cpu.squeeze()
 
         # 调整掩码尺寸到原始图像大小
         mask = (
             F.interpolate(
-                pred.unsqueeze(0).unsqueeze(0),
-                size=orig_sizes[i][::-1],  # (h, w)
+                pred_cpu.unsqueeze(0).unsqueeze(0),
+                size=img.size[::-1],  # (h, w)
                 mode="bilinear",
                 align_corners=False,
             )
@@ -117,12 +122,17 @@ def remove_background_batch(images: list, model, transform, device, autocast_ctx
         mask_img = Image.fromarray(mask)
 
         # 生成透明图
-        img = images[i].convert("RGBA")
-        rgba = Image.new("RGBA", img.size)
-        rgba.paste(img, (0, 0), mask_img)  # 使用掩码作为 alpha 通道
+        rgba_img = Image.new("RGBA", img.size)
+        rgba_img.paste(img.convert("RGBA"), (0, 0), mask_img)  # 使用掩码作为 alpha 通道
 
-        marks.append(mask_img)
-        results.append(rgba)
+        return i, rgba_img, mask_img
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        for i, rgba_img, mask_img in executor.map(
+            process_single, enumerate(zip(preds, images))
+        ):
+            results[i] = rgba_img
+            marks[i] = mask_img
 
     del batch_tensor, preds
     if device == "cuda":
