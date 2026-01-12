@@ -139,10 +139,11 @@ def process_directory(
     single_autocast = nullcontext()  # 单张处理更稳，关闭 autocast
 
     # Gather all images
-    image_files = []
-    for ext in IMAGE_EXTENSIONS:
-        image_files.extend(input_path.glob(f"*{ext}"))
-        image_files.extend(input_path.glob(f"*{ext.upper()}"))
+    image_files = [
+        p
+        for p in input_path.iterdir()
+        if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
+    ]
 
     if not image_files:
         print(f"No images found in {input_dir}")
