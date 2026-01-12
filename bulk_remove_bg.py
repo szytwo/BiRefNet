@@ -135,8 +135,6 @@ def remove_background_batch(
             marks[i] = mask_img
 
     del batch_tensor, preds
-    if device == "cuda":
-        torch.cuda.empty_cache()
 
     return results, marks
 
@@ -327,6 +325,12 @@ def process_directory(
                 except Exception as e2:
                     logging.warning(f"Failed on {name}: {e2}")
                     failed += 1
+                finally:
+                    del img, single_result, single_mark
+        finally:
+            del batch_results, batch_marks, batch_images
+            if device == "cuda":
+                torch.cuda.empty_cache()
 
     logging.info(f"Processing complete!")
     logging.info(f"Successful: {successful}")
@@ -386,22 +390,34 @@ def main():
         logging.warning(f"Invalid resolution '{args.resolution}', using 1024x1024")
         width, height = 1024, 1024
 
-    init_logging(str(ROOT_DIR))
+    try:
+        init_logging(str(ROOT_DIR))
 
-    # Setup model and transform
-    model = setup_model(args.checkpoint, args.device)
-    transform = get_transform((width, height))
+        # Setup model and transform
+        model = setup_model(args.checkpoint, args.device)
+        transform = get_transform((width, height))
 
-    process_directory(
-        args.input_dir,
-        args.output_dir,
-        model,
-        transform,
-        args.device,
-        batch_size=args.batch_size,
-        mixed_precision=args.mixed_precision,
-        save_mark=args.save_mark,
-    )
+        process_directory(
+            args.input_dir,
+            args.output_dir,
+            model,
+            transform,
+            args.device,
+            batch_size=args.batch_size,
+            mixed_precision=args.mixed_precision,
+            save_mark=args.save_mark,
+        )
+    except Exception as e:
+        logging.error(f"Unhandled exception in main: {e}")
+        sys.exit(1)
+    finally:
+        # 释放模型和 GPU
+        try:
+            del model
+        except NameError:
+            pass
+        if args.device == "cuda":
+            torch.cuda.empty_cache()
 
 
 if __name__ == "__main__":
