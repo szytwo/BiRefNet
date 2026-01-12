@@ -27,8 +27,12 @@ from tqdm import tqdm
 logging.getLogger("matplotlib").setLevel(logging.WARNING)
 # 设置日志格式
 formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
-# 创建日志目录（如果不存在）
-log_dir = "logs"
+
+# # 获取当前脚本所在目录
+base_dir = os.path.dirname(os.path.abspath(__file__))
+
+# 日志目录绝对路径
+log_dir = os.path.join(base_dir, "logs")
 os.makedirs(log_dir, exist_ok=True)
 
 
