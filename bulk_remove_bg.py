@@ -6,10 +6,10 @@ Supports GPU, batch inference, and half precision.
 """
 
 import argparse
-import concurrent.futures
 import io
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from pathlib import Path
 
@@ -131,6 +131,21 @@ def remove_background_batch(images: list, model, transform, device, autocast_ctx
     return results, marks
 
 
+def get_safe_max_workers(safety_factor=0.5, max_limit=16):
+    """
+    根据 CPU 核心数计算安全线程数，避免占满系统。
+
+    Args:
+        safety_factor: 使用核心数比例（0~1），默认 0.5
+        max_limit: 最大线程数上限，默认 16
+    Returns:
+        int: 安全线程数
+    """
+    cpu_count = os.cpu_count() or 1
+    safe_workers = max(1, int(cpu_count * safety_factor))
+    return min(safe_workers, max_limit)
+
+
 def load_image_safe(path):
     """安全加载图片并返回副本，失败返回 None"""
     try:
@@ -155,7 +170,7 @@ def load_images_threaded(image_paths, max_workers=8):
     images = []
     loaded_paths = []
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
         # executor.map 会按 image_paths 的顺序返回结果
         for img, path in zip(executor.map(load_image_safe, image_paths), image_paths):
             if img is not None:
@@ -163,6 +178,44 @@ def load_images_threaded(image_paths, max_workers=8):
                 loaded_paths.append(path)
 
     return images, loaded_paths
+
+
+def save_batch_results_threaded(
+    batch_names, batch_results, batch_marks, output_path, save_mark=False, max_workers=8
+):
+    """
+    多线程保存批量 RGBA 图像和 mask 图。
+
+    Args:
+        batch_names: 图片名称列表（不带后缀）
+        batch_results: RGBA PIL.Image 列表
+        batch_marks: mask PIL.Image 列表或 None
+        output_path: 输出目录 Path 对象
+        save_mark: 是否保存 mask 图
+        max_workers: 线程数
+    Returns:
+        successful: 成功保存的数量
+    """
+    successful = 0
+
+    def worker(args):
+        name, img_out, mark_out = args
+        try:
+            img_out.save(output_path / f"{name}.png")
+            if save_mark and mark_out:
+                mark_out.save(output_path / f"mark{name}.png")
+            return 1
+        except Exception as e:
+            logging.warning(f"Failed to save {name}: {e}")
+            return 0
+
+    tasks = list(zip(batch_names, batch_results, batch_marks))
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        for res in executor.map(worker, tasks):
+            successful += res
+
+    return successful
 
 
 def process_directory(
@@ -186,6 +239,9 @@ def process_directory(
     input_path = Path(input_dir)
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
+    max_workers = get_safe_max_workers(safety_factor=0.5, max_limit=16)
+
+    logging.info(f"Using up to {max_workers} threads for image loading/saving.")
 
     # Setup autocast context
     if mixed_precision == "fp16":
@@ -217,7 +273,7 @@ def process_directory(
     logging.info(f"Found {len(image_files)} images to process.")
 
     # 线程池加载，保持顺序
-    images, paths = load_images_threaded(image_files, max_workers=8)
+    images, paths = load_images_threaded(image_files, max_workers=max_workers)
 
     logging.info(f"成功加载 {len(images)}/{len(image_files)} 张图片")
 
@@ -232,11 +288,15 @@ def process_directory(
             batch_results, batch_marks = remove_background_batch(
                 batch_images, model, transform, device, batch_autocast
             )
-            for name, img_out, mark_out in zip(batch_names, batch_results, batch_marks):
-                img_out.save(output_path / f"{name}.png")
-                if save_mark:
-                    mark_out.save(output_path / f"mark{name}.png")
-                successful += 1
+
+            successful += save_batch_results_threaded(
+                batch_names=batch_names,
+                batch_results=batch_results,
+                batch_marks=batch_marks,
+                output_path=output_path,
+                save_mark=save_mark,
+                max_workers=max_workers,
+            )
         except Exception as e:
             logging.warning(f"Batch failed, fallback to single-image processing: {e}")
 
