@@ -27,6 +27,7 @@ def setup_model(local_checkpoint_path: str, device: str):
     from utils import check_state_dict
 
     print(f"Loading BiRefNet model from {local_checkpoint_path} on {device}...")
+
     torch.set_float32_matmul_precision("high")
 
     # Initialize model structure
@@ -35,11 +36,11 @@ def setup_model(local_checkpoint_path: str, device: str):
     # Load local weights
     state_dict = torch.load(local_checkpoint_path, map_location="cpu")
     state_dict = check_state_dict(state_dict)
-    model.load_state_dict(state_dict)
 
+    model.load_state_dict(state_dict)
     model.to(device)
     model.eval()
-    model.half()  # half precision
+
     return model
 
 
@@ -54,9 +55,6 @@ def get_transform(img_size=(1024, 1024)):
     )
 
 
-# -------------------------------
-# Batch Prediction
-# -------------------------------
 def remove_background_batch(images: list, model, transform, device, autocast_ctx):
     """
     Remove background from an image using BiRefNet.
@@ -77,12 +75,13 @@ def remove_background_batch(images: list, model, transform, device, autocast_ctx
         orig_sizes.append(img.size)  # (W,H)
         img_rgb = img.convert("RGB")
         tensor = transform(img_rgb)
+
         batch_tensors.append(tensor)
 
-    batch_tensor = torch.stack(batch_tensors).to(device).half()
+    batch_tensor = torch.stack(batch_tensors).to(device)
 
     with torch.no_grad(), autocast_ctx:
-        preds = model(batch_tensor)[-1].sigmoid().cpu()  # (B,C,H,W)
+        preds = model(batch_tensor)[-1].sigmoid()  # (B,C,H,W)
 
     results = []
     for i, pred in enumerate(preds):
@@ -93,7 +92,11 @@ def remove_background_batch(images: list, model, transform, device, autocast_ctx
         # Apply alpha channel
         img_out = images[i].convert("RGBA")
         img_out.putalpha(mask_pil)
+
         results.append(img_out)
+
+    del batch_tensor, preds
+    torch.cuda.empty_cache()
 
     return results
 
@@ -104,7 +107,7 @@ def process_directory(
     model,
     transform,
     device: str = "cuda",
-    batch_size: int = 8,
+    batch_size: int = 4,
     mixed_precision: str = "fp16",
 ):
     """
@@ -190,7 +193,7 @@ def main():
     parser.add_argument(
         "--checkpoint",
         type=str,
-        required=True,
+        default="./checkpoint/BiRefNet-general-epoch_244.pth",
         help="Path to local BiRefNet checkpoint (.pth)",
     )
     parser.add_argument(
@@ -201,7 +204,7 @@ def main():
         help="Device to run model on",
     )
     parser.add_argument(
-        "--batch_size", type=int, default=8, help="Batch size for inference"
+        "--batch_size", type=int, default=4, help="Batch size for inference"
     )
     parser.add_argument(
         "--mixed_precision",
