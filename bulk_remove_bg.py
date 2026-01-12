@@ -12,16 +12,18 @@ import sys
 from contextlib import nullcontext
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image
 from torchvision import transforms
 from tqdm import tqdm
 
-from wdd.file_utils import delete_old_files_and_folders, logging
+from wdd.file_utils import init_logging, logging
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 
+ROOT_DIR = Path(__file__).resolve().parent
 # Supported image extensions
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tiff", ".tif"}
 
@@ -33,8 +35,7 @@ def setup_model(local_checkpoint_path: str, device: str):
     from models.birefnet import BiRefNet
     from utils import check_state_dict
 
-    current_dir = Path(__file__).resolve().parent
-    model_path = (current_dir / local_checkpoint_path).resolve()
+    model_path = (ROOT_DIR / local_checkpoint_path).resolve()
 
     logging.info(f"Loading BiRefNet model from {model_path} on {device}...")
 
@@ -94,21 +95,38 @@ def remove_background_batch(images: list, model, transform, device, autocast_ctx
         preds = model(batch_tensor)[-1].sigmoid()  # (B,C,H,W)
 
     results = []
+    marks = []
     for i, pred in enumerate(preds):
-        mask = pred[0]  # single channel
-        mask_pil = transforms.ToPILImage()(mask)
-        mask_pil = mask_pil.resize(orig_sizes[i])  # restore original size
+        pred = pred[0].cpu() if pred.ndim == 3 else pred.cpu()
+        pred = pred.squeeze()
 
-        # Apply alpha channel
-        img_out = images[i].convert("RGBA")
-        img_out.putalpha(mask_pil)
+        # 调整掩码尺寸到原始图像大小
+        mask = (
+            F.interpolate(
+                pred.unsqueeze(0).unsqueeze(0),
+                size=orig_sizes[i][::-1],  # (h, w)
+                mode="bilinear",
+                align_corners=False,
+            )
+            .squeeze()
+            .numpy()
+        )
 
-        results.append(img_out)
+        mask = (mask * 255).astype(np.uint8)
+        mask_img = Image.fromarray(mask)
+
+        # 生成透明图
+        img = images[i].convert("RGBA")
+        rgba = Image.new("RGBA", img.size)
+        rgba.paste(img, (0, 0), mask_img)  # 使用掩码作为 alpha 通道
+
+        marks.append(mask_img)
+        results.append(rgba)
 
     del batch_tensor, preds
     torch.cuda.empty_cache()
 
-    return results
+    return results, marks
 
 
 def process_directory(
@@ -181,11 +199,12 @@ def process_directory(
             continue
 
         try:
-            batch_results = remove_background_batch(
+            batch_results, batch_marks = remove_background_batch(
                 batch_images, model, transform, device, batch_autocast
             )
-            for name, img_out in zip(batch_names, batch_results):
+            for name, img_out, mark_out in zip(batch_names, batch_results, batch_marks):
                 img_out.save(output_path / f"{name}.png")
+                mark_out.save(output_path / f"mark{name}.png")
                 successful += 1
         except Exception as e:
             logging.warning(f"Batch failed, fallback to single-image processing: {e}")
@@ -196,11 +215,12 @@ def process_directory(
             # 回退到逐张处理
             for img, name in zip(batch_images, batch_names):
                 try:
-                    single_result = remove_background_batch(
+                    single_result, single_mark = remove_background_batch(
                         [img], model, transform, device, single_autocast
                     )[0]
 
                     single_result.save(output_path / f"{name}.png")
+                    single_mark.save(output_path / f"mark{name}.png")
                     successful += 1
                 except Exception as e2:
                     logging.warning(f"Failed on {name}: {e2}")
@@ -260,6 +280,8 @@ def main():
     except Exception as e:
         logging.warning(f"Invalid resolution '{args.resolution}', using 1024x1024")
         width, height = 1024, 1024
+
+    init_logging(str(ROOT_DIR))
 
     # Setup model and transform
     model = setup_model(args.checkpoint, args.device)

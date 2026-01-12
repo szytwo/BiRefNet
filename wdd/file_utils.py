@@ -23,72 +23,71 @@ from logging.handlers import TimedRotatingFileHandler
 import torchaudio
 from tqdm import tqdm
 
-# 将 matplotlib 库的日志级别设置为 WARNING
-logging.getLogger("matplotlib").setLevel(logging.WARNING)
-# 设置日志格式
-formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
 
-# # 获取当前脚本所在目录
-base_dir = os.path.dirname(os.path.abspath(__file__))
+# 日志初始化函数
+def init_logging(root_dir):
+    """
+    初始化日志系统
+    - root_dir: 项目根目录
+    """
+    log_dir = os.path.join(root_dir, "logs")
+    os.makedirs(log_dir, exist_ok=True)
 
-# 日志目录绝对路径
-log_dir = os.path.join(base_dir, "logs")
-os.makedirs(log_dir, exist_ok=True)
+    # 将 matplotlib 库的日志级别设置为 WARNING
+    logging.getLogger("matplotlib").setLevel(logging.WARNING)
+    # 设置日志格式
+    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
 
+    # 自定义按日期命名的文件名生成函数
+    def get_dated_log_filename():
+        """生成按日期命名的日志文件名，格式为 YYYYMMDD.log"""
+        return os.path.join(log_dir, time.strftime("%Y%m%d") + ".log")
 
-# 自定义按日期命名的文件名生成函数
-def get_dated_log_filename():
-    """生成按日期命名的日志文件名，格式为 YYYYMMDD.log"""
-    return os.path.join(log_dir, time.strftime("%Y%m%d") + ".log")
+    # 自定义 TimedRotatingFileHandler，按日期命名文件
+    class DatedFileHandler(TimedRotatingFileHandler):
+        def __init__(self):
+            super().__init__(
+                filename=get_dated_log_filename(),  # 初始文件名
+                when="midnight",  # 每天午夜切割
+                interval=1,  # 间隔 1 天
+                backupCount=7,  # 保留最近 7 天的日志文件
+                encoding="utf-8",  # 设置文件编码
+            )
 
+        def doRollover(self):
+            """重写 doRollover 方法，按日期生成新文件名"""
+            self.baseFilename = get_dated_log_filename()  # 更新文件名
+            super().doRollover()  # 调用父类的 doRollover 方法
 
-# 自定义 TimedRotatingFileHandler，按日期命名文件
-class DatedFileHandler(TimedRotatingFileHandler):
-    def __init__(self):
-        super().__init__(
-            filename=get_dated_log_filename(),  # 初始文件名
-            when="midnight",  # 每天午夜切割
-            interval=1,  # 间隔 1 天
-            backupCount=7,  # 保留最近 7 天的日志文件
-            encoding="utf-8",  # 设置文件编码
-        )
+    # 自定义一个 TqdmLoggingHandler
+    class TqdmLoggingHandler(logging.Handler):
+        def emit(self, record):
+            try:
+                msg = self.format(record)
+                # 类型检查与处理
+                if isinstance(msg, (dict, list)):
+                    msg = json.dumps(
+                        msg, ensure_ascii=False, indent=4
+                    )  # 将字典或列表转为格式化的 JSON 字符串
+                elif not isinstance(msg, str):
+                    msg = str(msg)  # 其他类型转换为字符串
 
-    def doRollover(self):
-        """重写 doRollover 方法，按日期生成新文件名"""
-        self.baseFilename = get_dated_log_filename()  # 更新文件名
-        super().doRollover()  # 调用父类的 doRollover 方法
+                tqdm.write(msg)  # 将日志写入 tqdm 的 write 方法
+            except Exception as e:
+                print(f"Logging Error: {e}, Record: {record.__dict__}")
+                self.handleError(record)
 
+    # 创建 DatedFileHandler
+    file_handler = DatedFileHandler()
+    file_handler.setFormatter(formatter)
+    # 创建 TqdmLoggingHandler
+    tqdm_handler = TqdmLoggingHandler()
+    tqdm_handler.setFormatter(formatter)
 
-# 自定义一个 TqdmLoggingHandler
-class TqdmLoggingHandler(logging.Handler):
-    def emit(self, record):
-        try:
-            msg = self.format(record)
-            # 类型检查与处理
-            if isinstance(msg, (dict, list)):
-                msg = json.dumps(
-                    msg, ensure_ascii=False, indent=4
-                )  # 将字典或列表转为格式化的 JSON 字符串
-            elif not isinstance(msg, str):
-                msg = str(msg)  # 其他类型转换为字符串
-
-            tqdm.write(msg)  # 将日志写入 tqdm 的 write 方法
-        except Exception as e:
-            print(f"Logging Error: {e}, Record: {record.__dict__}")
-            self.handleError(record)
-
-
-# 创建 DatedFileHandler
-file_handler = DatedFileHandler()
-file_handler.setFormatter(formatter)
-# 创建 TqdmLoggingHandler
-tqdm_handler = TqdmLoggingHandler()
-tqdm_handler.setFormatter(formatter)
-
-logging.basicConfig(
-    level=logging.INFO,
-    handlers=[file_handler, tqdm_handler],  # 同时使用文件 Handler 和 Tqdm Handler
-)
+    logging.basicConfig(
+        level=logging.INFO,
+        handlers=[file_handler, tqdm_handler],  # 同时使用文件 Handler 和 Tqdm Handler
+    )
 
 
 def read_lists(list_file):
