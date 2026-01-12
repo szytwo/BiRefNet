@@ -137,6 +137,7 @@ def process_directory(
     device: str = "cuda",
     batch_size: int = 4,
     mixed_precision: str = "fp16",
+    save_mark: bool = False,
 ):
     """
     Process all images in input directory and save to output directory.
@@ -204,7 +205,8 @@ def process_directory(
             )
             for name, img_out, mark_out in zip(batch_names, batch_results, batch_marks):
                 img_out.save(output_path / f"{name}.png")
-                mark_out.save(output_path / f"mark{name}.png")
+                if save_mark:
+                    mark_out.save(output_path / f"mark{name}.png")
                 successful += 1
         except Exception as e:
             logging.warning(f"Batch failed, fallback to single-image processing: {e}")
@@ -220,7 +222,8 @@ def process_directory(
                     )[0]
 
                     single_result.save(output_path / f"{name}.png")
-                    single_mark.save(output_path / f"mark{name}.png")
+                    if save_mark:
+                        single_mark.save(output_path / f"mark{name}.png")
                     successful += 1
                 except Exception as e2:
                     logging.warning(f"Failed on {name}: {e2}")
@@ -272,6 +275,9 @@ def main():
         default="1024x1024",
         help="Input image resolution (e.g., 1024x1024 or 512x512)",
     )
+    parser.add_argument(
+        "--save_mark", action="store_true", default=False, help="save mark"
+    )
     args = parser.parse_args()
 
     # Parse resolution
@@ -295,6 +301,7 @@ def main():
         args.device,
         batch_size=args.batch_size,
         mixed_precision=args.mixed_precision,
+        save_mark=args.save_mark,
     )
 
 
