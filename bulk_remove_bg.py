@@ -125,7 +125,8 @@ def remove_background_batch(images: list, model, transform, device, autocast_ctx
         results.append(rgba)
 
     del batch_tensor, preds
-    torch.cuda.empty_cache()
+    if device == "cuda":
+        torch.cuda.empty_cache()
 
     return results, marks
 
