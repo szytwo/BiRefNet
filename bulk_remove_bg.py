@@ -6,6 +6,7 @@ Supports GPU, batch inference, and half precision.
 """
 
 import argparse
+import concurrent.futures
 import io
 import os
 import sys
@@ -129,6 +130,40 @@ def remove_background_batch(images: list, model, transform, device, autocast_ctx
     return results, marks
 
 
+def load_image_safe(path):
+    """安全加载图片并返回副本，失败返回 None"""
+    try:
+        with Image.open(path) as img:
+            img.verify()  # 验证图像是否损坏
+        with Image.open(path) as img:
+            return img.copy()
+    except Exception as e:
+        print(f"Failed to load {path}: {e}")
+        return None
+
+
+def load_images_threaded(image_paths, max_workers=8):
+    """
+    使用线程池加载一批图像，并保持原始顺序
+    Args:
+        image_paths: list[Path] 图片路径列表
+        max_workers: 最大线程数
+    Returns:
+        list[PIL.Image], list[Path]  成功加载的图像及其路径
+    """
+    images = []
+    loaded_paths = []
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # executor.map 会按 image_paths 的顺序返回结果
+        for img, path in zip(executor.map(load_image_safe, image_paths), image_paths):
+            if img is not None:
+                images.append(img)
+                loaded_paths.append(path)
+
+    return images, loaded_paths
+
+
 def process_directory(
     input_dir: str,
     output_dir: str,
@@ -180,24 +215,17 @@ def process_directory(
 
     logging.info(f"Found {len(image_files)} images to process.")
 
+    # 线程池加载，保持顺序
+    images, paths = load_images_threaded(image_files, max_workers=8)
+
+    logging.info(f"成功加载 {len(images)}/{len(image_files)} 张图片")
+
     # Batch processing
     successful, failed = 0, 0
-    for i in tqdm(range(0, len(image_files), batch_size), desc="Processing batches"):
-        batch_paths = image_files[i : i + batch_size]
-        batch_images = []
-        batch_names = []
-
-        for p in batch_paths:
-            try:
-                with Image.open(p) as img:
-                    batch_images.append(img.copy())
-                batch_names.append(p.stem)
-            except Exception as e:
-                logging.warning(f"Error loading {p.name}: {e}")
-                failed += 1
-
-        if not batch_images:
-            continue
+    for i in tqdm(range(0, len(images), batch_size), desc="Processing batches"):
+        batch_images = images[i : i + batch_size]
+        batch_paths = paths[i : i + batch_size]
+        batch_names = [p.stem for p in batch_paths]
 
         try:
             batch_results, batch_marks = remove_background_batch(
