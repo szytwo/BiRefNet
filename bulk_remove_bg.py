@@ -217,8 +217,12 @@ def main():
     parser = argparse.ArgumentParser(
         description="Batch background removal using local BiRefNet checkpoint"
     )
-    parser.add_argument("input_dir", type=str, help="Directory containing input images")
-    parser.add_argument("output_dir", type=str, help="Directory to save output images")
+    parser.add_argument(
+        "--input_dir", type=str, help="Directory containing input images"
+    )
+    parser.add_argument(
+        "--output_dir", type=str, help="Directory to save output images"
+    )
     parser.add_argument(
         "--checkpoint",
         type=str,
