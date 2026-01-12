@@ -174,8 +174,20 @@ def process_directory(
                 img_out.save(output_path / f"{name}.png")
                 successful += 1
         except Exception as e:
-            print(f"Error during batch prediction: {e}")
-            failed += len(batch_images)
+            print(f"\nBatch failed, fallback to single-image processing: {e}")
+
+            # 回退到逐张处理
+            for img, name in zip(batch_images, batch_names):
+                try:
+                    single_result = remove_background_batch(
+                        [img], model, transform, device, autocast_ctx
+                    )[0]
+
+                    single_result.save(output_path / f"{name}.png")
+                    successful += 1
+                except Exception as e2:
+                    print(f"  Failed on {name}: {e2}")
+                    failed += 1
 
     print(f"\nProcessing complete!")
     print(f"✓ Successful: {successful}")
