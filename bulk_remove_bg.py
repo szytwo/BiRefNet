@@ -6,7 +6,9 @@ Supports GPU, batch inference, and half precision.
 """
 
 import argparse
+import io
 import os
+import sys
 from contextlib import nullcontext
 from pathlib import Path
 
@@ -15,6 +17,8 @@ import torch.nn.functional as F
 from PIL import Image
 from torchvision import transforms
 from tqdm import tqdm
+
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 
 # Supported image extensions
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tiff", ".tif"}
@@ -182,7 +186,7 @@ def process_directory(
                 img_out.save(output_path / f"{name}.png")
                 successful += 1
         except Exception as e:
-            print(f"\nBatch failed, fallback to single-image processing: {e}")
+            print(f"Batch failed, fallback to single-image processing: {e}")
 
             if device == "cuda":
                 torch.cuda.empty_cache()
@@ -197,13 +201,13 @@ def process_directory(
                     single_result.save(output_path / f"{name}.png")
                     successful += 1
                 except Exception as e2:
-                    print(f"  Failed on {name}: {e2}")
+                    print(f"Failed on {name}: {e2}")
                     failed += 1
 
-    print(f"\nProcessing complete!")
-    print(f"✓ Successful: {successful}")
+    print(f"Processing complete!")
+    print(f"Successful: {successful}")
     if failed > 0:
-        print(f"✗ Failed: {failed}")
+        print(f"Failed: {failed}")
     print(f"Output saved to: {output_path}")
 
 
@@ -236,11 +240,24 @@ def main():
         default="fp16",
         help="Automatic mixed precision: fp16, bf16, or none",
     )
+    parser.add_argument(
+        "--resolution",
+        type=str,
+        default="1024x1024",
+        help="Input image resolution (e.g., 1024x1024 or 512x512)",
+    )
     args = parser.parse_args()
+
+    # Parse resolution
+    try:
+        width, height = [int(x) for x in args.resolution.lower().split("x")]
+    except Exception as e:
+        print(f"Invalid resolution '{args.resolution}', using 1024x1024")
+        width, height = 1024, 1024
 
     # Setup model and transform
     model = setup_model(args.checkpoint, args.device)
-    transform = get_transform()
+    transform = get_transform((width, height))
 
     process_directory(
         args.input_dir,
