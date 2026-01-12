@@ -129,11 +129,14 @@ def process_directory(
         mixed_dtype = torch.bfloat16
     else:
         mixed_dtype = None
-    autocast_ctx = (
+
+    batch_autocast = (
         torch.amp.autocast(device_type="cuda", dtype=mixed_dtype)
         if mixed_dtype and device == "cuda"
         else nullcontext()
     )
+
+    single_autocast = nullcontext()  # 单张处理更稳，关闭 autocast
 
     # Gather all images
     image_files = []
@@ -156,8 +159,8 @@ def process_directory(
 
         for p in batch_paths:
             try:
-                img = Image.open(p)
-                batch_images.append(img)
+                with Image.open(p) as img:
+                    batch_images.append(img.copy())
                 batch_names.append(p.stem)
             except Exception as e:
                 print(f"Error loading {p.name}: {e}")
@@ -168,7 +171,7 @@ def process_directory(
 
         try:
             batch_results = remove_background_batch(
-                batch_images, model, transform, device, autocast_ctx
+                batch_images, model, transform, device, batch_autocast
             )
             for name, img_out in zip(batch_names, batch_results):
                 img_out.save(output_path / f"{name}.png")
@@ -176,11 +179,14 @@ def process_directory(
         except Exception as e:
             print(f"\nBatch failed, fallback to single-image processing: {e}")
 
+            if device == "cuda":
+                torch.cuda.empty_cache()
+
             # 回退到逐张处理
             for img, name in zip(batch_images, batch_names):
                 try:
                     single_result = remove_background_batch(
-                        [img], model, transform, device, autocast_ctx
+                        [img], model, transform, device, single_autocast
                     )[0]
 
                     single_result.save(output_path / f"{name}.png")
