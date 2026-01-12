@@ -10,7 +10,7 @@ predictions/
 *.mp4
 *.avi
 e_*
-.vscode
+#.vscode
 ckpts/
 preds/
 evaluation/eval-*
@@ -19,6 +19,8 @@ tmp*
 *.pth
 core-*-python-*
 .DS_Store
+Thumbs.db
+desktop.ini
 __MACOSX/
 
 # Byte-compiled / optimized / DLL files
@@ -150,3 +152,15 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# Development Tools.
+.idea/
+
+# data files
+*.whl
+*.tar
+*.uploading.cfg
+
+checkpoint/
+examples/input/
+examples/output/
