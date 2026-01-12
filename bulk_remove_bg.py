@@ -6,6 +6,7 @@ Supports GPU, batch inference, and half precision.
 """
 
 import argparse
+import os
 from contextlib import nullcontext
 from pathlib import Path
 
@@ -26,7 +27,10 @@ def setup_model(local_checkpoint_path: str, device: str):
     from models.birefnet import BiRefNet
     from utils import check_state_dict
 
-    print(f"Loading BiRefNet model from {local_checkpoint_path} on {device}...")
+    current_dir = Path(__file__).resolve().parent
+    model_path = (current_dir / local_checkpoint_path).resolve()
+
+    print(f"Loading BiRefNet model from {model_path} on {device}...")
 
     torch.set_float32_matmul_precision("high")
 
@@ -34,7 +38,7 @@ def setup_model(local_checkpoint_path: str, device: str):
     model = BiRefNet(bb_pretrained=False)
 
     # Load local weights
-    state_dict = torch.load(local_checkpoint_path, map_location="cpu")
+    state_dict = torch.load(str(model_path), map_location="cpu")
     state_dict = check_state_dict(state_dict)
 
     model.load_state_dict(state_dict)
