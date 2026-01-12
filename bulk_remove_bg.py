@@ -283,7 +283,7 @@ def process_directory(
     # 线程池加载，保持顺序
     images, paths = load_images_threaded(image_files, max_workers=max_workers)
 
-    logging.info(f"成功加载 {len(images)}/{len(image_files)} 张图片")
+    logging.info(f"Loading complete {len(images)}/{len(image_files)} images.")
 
     # Batch processing
     successful, failed = 0, 0
