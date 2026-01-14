@@ -9,6 +9,7 @@ import argparse
 import io
 import os
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from pathlib import Path
@@ -87,9 +88,7 @@ def remove_background_batch(
     batch_tensors = []
 
     for img in images:
-        img_rgb = img.convert("RGB")
-        tensor = transform(img_rgb)
-
+        tensor = transform(img)
         batch_tensors.append(tensor)
 
     batch_tensor = torch.stack(batch_tensors).to(device)
@@ -103,23 +102,29 @@ def remove_background_batch(
 
     def process_single(i_pred_img):
         i, (pred, img) = i_pred_img
-        pred_cpu = pred[0].cpu() if pred.ndim == 3 else pred.cpu()
-        pred_cpu = pred_cpu.squeeze()
+
+        if pred.ndim == 3:
+            pred = pred.squeeze(0)
+        elif pred.ndim != 2:
+            raise ValueError(f"Unexpected pred shape: {pred.shape}")
+
+        pred = pred.unsqueeze(0).unsqueeze(0)
 
         # 调整掩码尺寸到原始图像大小
         mask = (
             F.interpolate(
-                pred_cpu.unsqueeze(0).unsqueeze(0),
-                size=img.size[::-1],  # (h, w)
+                pred,
+                size=(img.height, img.width),
                 mode="bilinear",
                 align_corners=False,
             )
             .squeeze()
+            .cpu()
             .numpy()
         )
 
-        mask = (mask * 255).astype(np.uint8)
-        mask_img = Image.fromarray(mask)
+        mask_u8 = (mask * 255).astype(np.uint8)
+        mask_img = Image.fromarray(mask_u8, mode="L")
 
         # 生成透明图
         rgba_img = Image.new("RGBA", img.size)
@@ -158,11 +163,10 @@ def load_image_safe(path):
     """安全加载图片并返回副本，失败返回 None"""
     try:
         with Image.open(path) as img:
-            img.verify()  # 验证图像是否损坏
-        with Image.open(path) as img:
+            img = img.convert("RGB")  # RGB 规范化
             return img.copy()
     except Exception as e:
-        print(f"Failed to load {path}: {e}")
+        logging.warning(f"Failed to load {path}: {e}")
         return None
 
 
@@ -244,6 +248,9 @@ def process_directory(
         output_dir: Path to output directory for processed images
         device: Device to run model on ('cuda' or 'cpu')
     """
+    # 记录开始时间
+    start_time = time.time()
+
     input_path = Path(input_dir)
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -280,17 +287,14 @@ def process_directory(
 
     logging.info(f"Found {len(image_files)} images to process.")
 
-    # 线程池加载，保持顺序
-    images, paths = load_images_threaded(image_files, max_workers=max_workers)
-
-    logging.info(f"Loading complete {len(images)}/{len(image_files)} images.")
-
     # Batch processing
     successful, failed = 0, 0
-    for i in tqdm(range(0, len(images), batch_size), desc="Processing batches"):
-        batch_images = images[i : i + batch_size]
-        batch_paths = paths[i : i + batch_size]
-        batch_names = [p.stem for p in batch_paths]
+    for i in tqdm(range(0, len(image_files), batch_size), desc="Processing batches"):
+        batch_paths = image_files[i : i + batch_size]
+
+        # 线程池加载，保持顺序
+        batch_images, paths = load_images_threaded(batch_paths, max_workers=max_workers)
+        batch_names = [p.stem for p in paths]
 
         try:
             batch_results, batch_marks = remove_background_batch(
@@ -314,9 +318,11 @@ def process_directory(
             # 回退到逐张处理
             for img, name in zip(batch_images, batch_names):
                 try:
-                    single_result, single_mark = remove_background_batch(
+                    results, marks = remove_background_batch(
                         [img], model, transform, device, single_autocast
-                    )[0]
+                    )
+                    single_result = results[0]
+                    single_mark = marks[0]
 
                     single_result.save(output_path / f"{name}.png")
                     if save_mark:
@@ -326,13 +332,16 @@ def process_directory(
                     logging.warning(f"Failed on {name}: {e2}")
                     failed += 1
                 finally:
-                    del img, single_result, single_mark
+                    del img, results, marks
         finally:
             del batch_results, batch_marks, batch_images
-            if device == "cuda":
+            if device == "cuda" and i > 0 and i % 8 == 0:
                 torch.cuda.empty_cache()
 
-    logging.info(f"Processing complete!")
+    # 计算耗时
+    elapsed = time.time() - start_time
+
+    logging.info(f"Processing complete in {elapsed} seconds.")
     logging.info(f"Successful: {successful}")
     if failed > 0:
         logging.warning(f"Failed: {failed}")
