@@ -97,36 +97,17 @@ def enhance_hair_details(mask_np, img_np):
     return mask_with_hair.astype(np.float32) / 255.0
 
 
-def feather_mask_edges(mask_np, feather_radius=3):
+def feather_mask_edges(mask_np):
     """羽化mask边缘，创建自然过渡"""
-    # 创建距离变换
-    mask_u8 = (mask_np * 255).astype(np.uint8)
-    _, mask_binary = cv2.threshold(mask_u8, 127, 255, cv2.THRESH_BINARY)
+    # 轻微高斯模糊，创建自然过渡
+    blurred = cv2.GaussianBlur(mask_np, (3, 3), 0.3)
 
-    # 计算距离变换
-    dist = cv2.distanceTransform(mask_binary, cv2.DIST_L2, 5)
+    # 混合策略：保留原始细节，只轻微平滑
+    # 90%原图 + 10%模糊，保持边缘锐利的同时消除锯齿
+    result = mask_np * 0.9 + blurred * 0.1
 
-    # 归一化
-    cv2.normalize(dist, dist, 0, 1.0, cv2.NORM_MINMAX)
-
-    # 创建羽化区域
-    feather_mask = np.zeros_like(mask_np, dtype=np.float32)
-
-    # 在边缘区域创建渐变
-    edge_mask = (dist > 0) & (dist < feather_radius / 255.0)
-    feather_mask[edge_mask] = dist[edge_mask] * (255.0 / feather_radius)
-
-    # 在内部区域保持原值
-    inner_mask = dist >= feather_radius / 255.0
-    feather_mask[inner_mask] = 255.0
-
-    # 结合羽化效果
-    result = np.zeros_like(mask_np)
-    result[inner_mask] = mask_np[inner_mask]
-
-    # 边缘区域使用羽化值
-    edge_alpha = feather_mask[edge_mask] / 255.0
-    result[edge_mask] = mask_np[edge_mask] * edge_alpha
+    # 确保不降低任何像素的透明度
+    result = np.maximum(result, mask_np)
 
     return np.clip(result, 0, 1)
 
@@ -139,7 +120,7 @@ def remove_background_batch(
     autocast_ctx,
     max_workers=8,
     hair_detail=True,  # 是否增强头发丝细节
-    feather_edges=True,  # 是否羽化边缘
+    feather_edges=False,  # 是否羽化边缘
     threshold=0.45,  # 人物通常需要稍低的阈值保留发丝
     edge_guide=True,  # 是否使用原图边缘引导
 ):
@@ -234,7 +215,7 @@ def remove_background_batch(
 
         # 6. 边缘羽化
         if feather_edges:
-            mask_enhanced = feather_mask_edges(mask_enhanced, feather_radius=3)
+            mask_enhanced = feather_mask_edges(mask_enhanced)
 
         # 确保值范围在0-1
         mask_enhanced = np.clip(mask_enhanced, 0.0, 1.0)
@@ -350,30 +331,53 @@ def save_batch_results_threaded(
 def get_person_matting_params(person_type="general"):
     """根据人物类型返回优化的参数"""
     params_map = {
-        "general": {  # 通用人物
-            "hair_detail": True,
-            "feather_edges": True,
-            "threshold": 0.45,
+        "general": {  # 通用人物（默认）
+            "hair_detail": True,  # 开启头发细节
+            "feather_edges": False,  # 关闭羽化（导致细节丢失）
+            "threshold": 0.45,  # 中等阈值
+            "edge_guide": True,  # 使用原图边缘引导
         },
-        "portrait": {  # 肖像特写
-            "hair_detail": True,
-            "feather_edges": True,
-            "threshold": 0.4,  # 更低阈值保留更多细节
+        "portrait": {  # 肖像特写（面部特写）
+            "hair_detail": True,  # 重要！面部特写需要头发细节
+            "feather_edges": False,  # 关闭羽化（面部边缘需要清晰）
+            "threshold": 0.42,  # 稍低阈值，保留面部细节
+            "edge_guide": True,  # 使用原图边缘引导
         },
         "full_body": {  # 全身照
-            "hair_detail": False,  # 全身照头发细节不重要
-            "feather_edges": True,
-            "threshold": 0.5,  # 稍高阈值，轮廓更清晰
+            "hair_detail": True,  # 开启头发细节
+            "feather_edges": False,  # 关闭羽化
+            "threshold": 0.5,  # 稍高阈值，全身照轮廓需要更清晰
+            "edge_guide": True,  # 使用原图边缘引导
         },
         "long_hair": {  # 长发人物
-            "hair_detail": True,
-            "feather_edges": True,
-            "threshold": 0.4,
+            "hair_detail": True,  # 重要！长发需要细节
+            "feather_edges": False,  # 关闭羽化（头发丝需要清晰）
+            "threshold": 0.38,  # 较低阈值，保留发丝
+            "edge_guide": True,  # 使用原图边缘引导
         },
         "group": {  # 多人合照
-            "hair_detail": False,  # 关闭头发细节，提高速度
-            "feather_edges": False,
-            "threshold": 0.5,
+            "hair_detail": False,  # 关闭头发细节，提高处理速度
+            "feather_edges": False,  # 关闭羽化
+            "threshold": 0.5,  # 较高阈值，确保每个人物轮廓清晰
+            "edge_guide": False,  # 关闭边缘引导（复杂场景可能引入噪声）
+        },
+        "id_photo": {  # 证件照
+            "hair_detail": False,  # 证件照通常发型整齐，不需要细节增强
+            "feather_edges": False,  # 绝对不要羽化
+            "threshold": 0.55,  # 高阈值，确保轮廓非常清晰
+            "edge_guide": False,  # 关闭边缘引导（避免引入背景噪声）
+        },
+        "artistic": {  # 艺术照/写真
+            "hair_detail": True,  # 需要头发细节
+            "feather_edges": False,  # 通常不需要羽化
+            "threshold": 0.4,  # 低阈值保留更多艺术细节
+            "edge_guide": True,  # 使用原图边缘引导
+        },
+        "ecommerce": {  # 电商模特图
+            "hair_detail": True,  # 需要头发细节
+            "feather_edges": False,  # 需要清晰边缘
+            "threshold": 0.45,  # 中等阈值
+            "edge_guide": True,  # 使用边缘引导
         },
     }
 
