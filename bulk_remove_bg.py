@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from pathlib import Path
 
+import cv2
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -68,8 +69,79 @@ def get_transform(img_size=(1024, 1024)):
     )
 
 
+def enhance_hair_details(mask_np, img_np):
+    """增强头发丝细节"""
+    # 提取高频细节（头发丝通常为高频）
+    gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+    gray_blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    high_freq = cv2.subtract(gray, gray_blur)
+
+    # 增强高频部分
+    high_freq_enhanced = cv2.multiply(high_freq, 1.5)
+    high_freq_enhanced = np.clip(high_freq_enhanced, 0, 255)
+
+    # 提取可能的头发丝区域（高频且亮度适中）
+    _, hair_candidate = cv2.threshold(high_freq_enhanced, 15, 255, cv2.THRESH_BINARY)
+
+    # 只保留mask边缘附近的头发丝
+    mask_edges = cv2.Canny((mask_np * 255).astype(np.uint8), 30, 100)
+    kernel = np.ones((3, 3), np.uint8)
+    mask_edges_dilated = cv2.dilate(mask_edges, kernel, iterations=2)
+
+    # 提取并增强头发丝
+    hair_details = cv2.bitwise_and(hair_candidate, mask_edges_dilated)
+
+    # 将头发丝细节添加到mask
+    mask_with_hair = cv2.bitwise_or((mask_np * 255).astype(np.uint8), hair_details)
+
+    return mask_with_hair.astype(np.float32) / 255.0
+
+
+def feather_mask_edges(mask_np, feather_radius=3):
+    """羽化mask边缘，创建自然过渡"""
+    # 创建距离变换
+    mask_u8 = (mask_np * 255).astype(np.uint8)
+    _, mask_binary = cv2.threshold(mask_u8, 127, 255, cv2.THRESH_BINARY)
+
+    # 计算距离变换
+    dist = cv2.distanceTransform(mask_binary, cv2.DIST_L2, 5)
+
+    # 归一化
+    cv2.normalize(dist, dist, 0, 1.0, cv2.NORM_MINMAX)
+
+    # 创建羽化区域
+    feather_mask = np.zeros_like(mask_np, dtype=np.float32)
+
+    # 在边缘区域创建渐变
+    edge_mask = (dist > 0) & (dist < feather_radius / 255.0)
+    feather_mask[edge_mask] = dist[edge_mask] * (255.0 / feather_radius)
+
+    # 在内部区域保持原值
+    inner_mask = dist >= feather_radius / 255.0
+    feather_mask[inner_mask] = 255.0
+
+    # 结合羽化效果
+    result = np.zeros_like(mask_np)
+    result[inner_mask] = mask_np[inner_mask]
+
+    # 边缘区域使用羽化值
+    edge_alpha = feather_mask[edge_mask] / 255.0
+    result[edge_mask] = mask_np[edge_mask] * edge_alpha
+
+    return np.clip(result, 0, 1)
+
+
 def remove_background_batch(
-    images: list, model, transform, device, autocast_ctx, max_workers=8
+    images: list,
+    model,
+    transform,
+    device,
+    autocast_ctx,
+    max_workers=8,
+    hair_detail=True,  # 是否增强头发丝细节
+    feather_edges=True,  # 是否羽化边缘
+    threshold=0.45,  # 人物通常需要稍低的阈值保留发丝
+    edge_guide=True,  # 是否使用原图边缘引导
 ):
     """
     Remove background from an image using BiRefNet.
@@ -79,6 +151,10 @@ def remove_background_batch(
         model: BiRefNet model
         transform: Image transformation pipeline
         device: torch device (cuda/cpu)
+        hair_detail: 增强头发丝细节
+        feather_edges: 边缘羽化使过渡更自然
+        threshold: 分割阈值
+        edge_guide: 使用原图边缘信息优化掩码
 
     Returns:
         PIL Image with transparent background
@@ -103,6 +179,11 @@ def remove_background_batch(
     def process_single(i_pred_img):
         i, (pred, img) = i_pred_img
 
+        # 获取原图
+        img_np = np.array(img.convert("RGB"))
+        h, w = img.height, img.width
+
+        # 处理预测张量
         if pred.ndim == 3:
             pred = pred.squeeze(0)
         elif pred.ndim != 2:
@@ -110,32 +191,68 @@ def remove_background_batch(
 
         pred = pred.unsqueeze(0).unsqueeze(0)
 
-        # 调整掩码尺寸到原始图像大小
+        # 上采样到原图尺寸 - 使用bicubic保留更多细节
         mask = (
-            F.interpolate(
-                pred,
-                size=(img.height, img.width),
-                mode="bilinear",
-                align_corners=False,
-            )
+            F.interpolate(pred, size=(h, w), mode="bicubic", align_corners=False)
             .squeeze()
             .cpu()
             .numpy()
         )
 
-        mask_u8 = (mask * 255).astype(np.uint8)
+        # 1. 基础阈值化（针对人物调整阈值）
+        mask_binary = np.where(mask > threshold, 1.0, 0.0).astype(np.float32)
+
+        # 2. 轻微高斯模糊去噪
+        mask_blur = cv2.GaussianBlur(mask_binary, (3, 3), 0.5)
+
+        # 3. 形态学操作 - 填充小的孔洞（如头发间的空隙）
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        mask_closed = cv2.morphologyEx(mask_blur, cv2.MORPH_CLOSE, kernel, iterations=1)
+        mask_clean = cv2.morphologyEx(mask_closed, cv2.MORPH_OPEN, kernel, iterations=1)
+
+        # 4. 边缘引导优化（使用原图边缘信息）
+        if edge_guide:
+            # 获取原图边缘
+            gray_img = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+            img_edges = cv2.Canny(gray_img, 50, 150)
+
+            # 提取mask边缘
+            mask_edges = cv2.Canny((mask_clean * 255).astype(np.uint8), 30, 100)
+
+            # 结合原图边缘信息
+            combined_edges = cv2.bitwise_or(img_edges, mask_edges)
+
+            # 将精细边缘融合到mask
+            edges_weight = combined_edges.astype(np.float32) / 255.0 * 0.3
+            mask_enhanced = np.clip(mask_clean + edges_weight, 0, 1)
+        else:
+            mask_enhanced = mask_clean
+
+        # 5. 头发丝细节增强
+        if hair_detail:
+            mask_enhanced = enhance_hair_details(mask_enhanced, img_np)
+
+        # 6. 边缘羽化
+        if feather_edges:
+            mask_enhanced = feather_mask_edges(mask_enhanced, feather_radius=3)
+
+        # 确保值范围在0-1
+        mask_enhanced = np.clip(mask_enhanced, 0.0, 1.0)
+
+        # 生成最终结果
+        mask_u8 = (mask_enhanced * 255).astype(np.uint8)
         mask_img = Image.fromarray(mask_u8, mode="L")
 
         # 生成透明图
-        rgba_img = Image.new("RGBA", img.size)
+        rgba_img = Image.new("RGBA", (w, h))
         rgba_img.paste(img.convert("RGBA"), (0, 0), mask_img)  # 使用掩码作为 alpha 通道
 
         return i, rgba_img, mask_img
 
+    # 使用线程池处理
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        for i, rgba_img, mask_img in executor.map(
-            process_single, enumerate(zip(preds, images))
-        ):
+        futures = executor.map(process_single, enumerate(zip(preds, images)))
+        for i, rgba_img, mask_img in futures:
             results[i] = rgba_img
             marks[i] = mask_img
 
@@ -230,6 +347,39 @@ def save_batch_results_threaded(
     return successful
 
 
+def get_person_matting_params(person_type="general"):
+    """根据人物类型返回优化的参数"""
+    params_map = {
+        "general": {  # 通用人物
+            "hair_detail": True,
+            "feather_edges": True,
+            "threshold": 0.45,
+        },
+        "portrait": {  # 肖像特写
+            "hair_detail": True,
+            "feather_edges": True,
+            "threshold": 0.4,  # 更低阈值保留更多细节
+        },
+        "full_body": {  # 全身照
+            "hair_detail": False,  # 全身照头发细节不重要
+            "feather_edges": True,
+            "threshold": 0.5,  # 稍高阈值，轮廓更清晰
+        },
+        "long_hair": {  # 长发人物
+            "hair_detail": True,
+            "feather_edges": True,
+            "threshold": 0.4,
+        },
+        "group": {  # 多人合照
+            "hair_detail": False,  # 关闭头发细节，提高速度
+            "feather_edges": False,
+            "threshold": 0.5,
+        },
+    }
+
+    return params_map.get(person_type, params_map["general"])
+
+
 def process_directory(
     input_dir: str,
     output_dir: str,
@@ -239,6 +389,7 @@ def process_directory(
     batch_size: int = 4,
     mixed_precision: str = "fp16",
     save_mark: bool = False,
+    person_type="full_body",
 ):
     """
     Process all images in input directory and save to output directory.
@@ -255,8 +406,12 @@ def process_directory(
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     max_workers = get_safe_max_workers(safety_factor=0.5, max_limit=16)
+    params = get_person_matting_params(person_type)
 
-    logging.info(f"Using up to {max_workers} threads for image loading/saving.")
+    logging.info(
+        f"Using up to {max_workers} threads for image loading/saving."
+        f"\nparams: {params}"
+    )
 
     # Setup autocast context
     if mixed_precision == "fp16":
@@ -298,7 +453,13 @@ def process_directory(
 
         try:
             batch_results, batch_marks = remove_background_batch(
-                batch_images, model, transform, device, batch_autocast
+                batch_images,
+                model,
+                transform,
+                device,
+                batch_autocast,
+                max_workers=max_workers,
+                **params,
             )
 
             successful += save_batch_results_threaded(
@@ -319,7 +480,13 @@ def process_directory(
             for img, name in zip(batch_images, batch_names):
                 try:
                     results, marks = remove_background_batch(
-                        [img], model, transform, device, single_autocast
+                        [img],
+                        model,
+                        transform,
+                        device,
+                        single_autocast,
+                        max_workers=max_workers,
+                        **params,
                     )
                     single_result = results[0]
                     single_mark = marks[0]
