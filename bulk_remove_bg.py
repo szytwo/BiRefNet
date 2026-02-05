@@ -97,6 +97,36 @@ def enhance_hair_details(mask_np, img_np):
     return mask_with_hair.astype(np.float32) / 255.0
 
 
+def sharpen_mask_edges(mask_np):
+    """
+    使用掩码自身的边缘进行锐化，不依赖原图
+    避免引入背景噪声
+    """
+    import cv2
+    import numpy as np
+
+    # 转换为uint8
+    mask_u8 = (mask_np * 255).astype(np.uint8)
+
+    # 提取掩码边缘
+    edges = cv2.Canny(mask_u8, 30, 100)
+
+    # 边缘膨胀（确保边缘连续）
+    kernel = np.ones((2, 2), np.uint8)
+    edges_dilated = cv2.dilate(edges, kernel, iterations=1)
+
+    # 将边缘添加到掩码（增强边缘）
+    mask_enhanced = cv2.bitwise_or(mask_u8, edges_dilated)
+
+    # 轻微高斯模糊平滑
+    mask_blurred = cv2.GaussianBlur(mask_enhanced, (3, 3), 0.3)
+
+    # 混合：90%增强 + 10%模糊
+    result = mask_enhanced * 0.9 + mask_blurred * 0.1
+
+    return np.clip(result, 0, 255).astype(np.float32) / 255.0
+
+
 def remove_background_batch(
     images: list,
     model,
@@ -106,7 +136,7 @@ def remove_background_batch(
     max_workers=8,
     hair_detail=True,  # 是否增强头发丝细节
     threshold=0.45,  # 人物通常需要稍低的阈值保留发丝
-    edge_guide=True,  # 是否使用原图边缘引导
+    sharpen_edges=True,  # 使用掩码自身的边缘锐化
 ):
     """
     Remove background from an image using BiRefNet.
@@ -118,7 +148,7 @@ def remove_background_batch(
         device: torch device (cuda/cpu)
         hair_detail: 增强头发丝细节
         threshold: 分割阈值
-        edge_guide: 使用原图边缘信息优化掩码
+        sharpen_edges: 使用掩码自身的边缘锐化
 
     Returns:
         PIL Image with transparent background
@@ -174,27 +204,15 @@ def remove_background_batch(
         mask_closed = cv2.morphologyEx(mask_blur, cv2.MORPH_CLOSE, kernel, iterations=1)
         mask_clean = cv2.morphologyEx(mask_closed, cv2.MORPH_OPEN, kernel, iterations=1)
 
-        # 4. 边缘引导优化（使用原图边缘信息）
-        if edge_guide:
-            # 获取原图边缘
-            gray_img = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
-            img_edges = cv2.Canny(gray_img, 50, 150)
-
-            # 提取mask边缘
-            mask_edges = cv2.Canny((mask_clean * 255).astype(np.uint8), 30, 100)
-
-            # 结合原图边缘信息
-            combined_edges = cv2.bitwise_or(img_edges, mask_edges)
-
-            # 将精细边缘融合到mask
-            edges_weight = combined_edges.astype(np.float32) / 255.0 * 0.3
-            mask_enhanced = np.clip(mask_clean + edges_weight, 0, 1)
+        # 头发丝细节增强
+        if hair_detail:
+            mask_enhanced = enhance_hair_details(mask_clean, img_np)
         else:
             mask_enhanced = mask_clean
 
-        # 5. 头发丝细节增强
-        if hair_detail:
-            mask_enhanced = enhance_hair_details(mask_enhanced, img_np)
+        # 使用掩码自身的边缘锐化
+        if sharpen_edges:
+            mask_enhanced = sharpen_mask_edges(mask_enhanced)
 
         # 确保值范围在0-1
         mask_enhanced = np.clip(mask_enhanced, 0.0, 1.0)
@@ -313,42 +331,42 @@ def get_person_matting_params(person_type="general"):
         "general": {  # 通用人物（默认）
             "hair_detail": True,  # 开启头发细节
             "threshold": 0.45,  # 中等阈值
-            "edge_guide": True,  # 使用原图边缘引导
+            "sharpen_edges": True,  # 开启边缘锐化
         },
         "portrait": {  # 肖像特写（面部特写）
             "hair_detail": True,  # 重要！面部特写需要头发细节
             "threshold": 0.42,  # 稍低阈值，保留面部细节
-            "edge_guide": True,  # 使用原图边缘引导
+            "sharpen_edges": True,  # 开启边缘锐化
         },
         "full_body": {  # 全身照
-            "hair_detail": True,  # 开启头发细节
+            "hair_detail": False,  # 关闭头发细节，提高处理速度
             "threshold": 0.5,  # 稍高阈值，全身照轮廓需要更清晰
-            "edge_guide": True,  # 使用原图边缘引导
+            "sharpen_edges": True,  # 开启边缘锐化
         },
         "long_hair": {  # 长发人物
             "hair_detail": True,  # 重要！长发需要细节
             "threshold": 0.38,  # 较低阈值，保留发丝
-            "edge_guide": True,  # 使用原图边缘引导
+            "sharpen_edges": True,  # 开启边缘锐化
         },
         "group": {  # 多人合照
             "hair_detail": False,  # 关闭头发细节，提高处理速度
             "threshold": 0.5,  # 较高阈值，确保每个人物轮廓清晰
-            "edge_guide": False,  # 关闭边缘引导（复杂场景可能引入噪声）
+            "sharpen_edges": False,  # 关闭边缘锐化（复杂场景可能引入噪声）
         },
         "id_photo": {  # 证件照
             "hair_detail": False,  # 证件照通常发型整齐，不需要细节增强
             "threshold": 0.55,  # 高阈值，确保轮廓非常清晰
-            "edge_guide": False,  # 关闭边缘引导（避免引入背景噪声）
+            "sharpen_edges": False,  # 关闭边缘锐化（避免引入背景噪声）
         },
         "artistic": {  # 艺术照/写真
             "hair_detail": True,  # 需要头发细节
             "threshold": 0.4,  # 低阈值保留更多艺术细节
-            "edge_guide": True,  # 使用原图边缘引导
+            "sharpen_edges": True,  # 开启边缘锐化
         },
         "ecommerce": {  # 电商模特图
             "hair_detail": True,  # 需要头发细节
             "threshold": 0.45,  # 中等阈值
-            "edge_guide": True,  # 使用边缘引导
+            "sharpen_edges": True,  # 开启边缘锐化
         },
     }
 
